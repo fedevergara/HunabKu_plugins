@@ -11,13 +11,16 @@ each route. Each route reads only its own collection.
 | `/dam/catalog` | | Routes, collections, number of documents and parser |
 | `/dam/scraped/cvlac/{cod_rh}` | `scraped_cvlac` | CvLAC profile converted by [cvlac-json](https://github.com/restrepo/cvlac-json) from the scraped page, without its long lists |
 | `/dam/scraped/cvlac/{cod_rh}/{part}` | `scraped_cvlac` | One page of `works`, `projects`, `events`, `awards` or `sections` (`page`, `size`) |
+| `/dam/scraped/gruplac/{group_code}` | `scraped_gruplac` | GrupLAC group converted by Yuku from the scraped page, without members and production |
+| `/dam/scraped/gruplac/{group_code}/{part}` | `scraped_gruplac` | One page of `members` or `production` (`page`, `size`) |
 
 * **Formats**: `?format=json` (default) or `?format=jsonld`, or the `Accept: application/ld+json` header.
   The JSON-LD view is the one of `cvlac_json.to_jsonld`: the same document plus `@context`, `@id` and `@type`.
   In a page, each item keeps the `@id` it has in the whole profile (`.../dam/scraped/cvlac/0000000639#/works/120`).
-* **Provenance**: `_provenance.source` (scraped page: collection, URL, date, SHA-256) and `_provenance.parser`
-  (name, version, commit and options of the parser).
-* **Not served**: sex.
+  GrupLAC uses the same terms where the keys mean the same, and [its vocabulary](docs/gruplac.md) otherwise.
+* **Provenance**: `_provenance.source` (scraped page: collection, URL, date, SHA-256), `_provenance.parser`
+  (name, version, commit and options of the parser) and, for GrupLAC, `_provenance.bibliographic_transformation`.
+* **Not served**: sex (CvLAC), e-mail of the group (GrupLAC).
 
 # Authentication
 The server has to be started with `HUNABKU_APIKEY`; with Hunabku's default apikey the `/dam` endpoints answer 503.
@@ -61,6 +64,7 @@ config.hunabku_dam.Dam.Dam.db_uri = "mongodb://localhost:27017/"
 config.hunabku_dam.Dam.Dam.db_name = "dam"
 config.hunabku_dam.Dam.Dam.public_url = "https://apis.colav.co"  # base of links and JSON-LD @id; empty: the request URL
 config.hunabku_dam.Dam.Dam.scraped_cvlac = "cvlac_json_f104110_20260823"
+config.hunabku_dam.Dam.Dam.scraped_gruplac = "gruplac_related_works_reconciled_minciencias_catalog_20261017"
 config.hunabku_dam.Dam.Dam.page_size = 100
 config.hunabku_dam.Dam.Dam.max_page_size = 500
 ```

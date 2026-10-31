@@ -1,13 +1,15 @@
 from hunabku.HunabkuBase import HunabkuPluginBase, endpoint
 from hunabku.Config import Config, Param
 from pymongo import MongoClient
-from hunabku_dam import cvlac
+from hunabku_dam import cvlac, gruplac
 import datetime
 import hmac
 import math
 
 DEFAULT_APIKEY = "colavudea"  # Hunabku's apikey when HUNABKU_APIKEY is not set
 FORMATS = {"json": "application/json", "jsonld": "application/ld+json"}
+# route -> (module with the queries and the JSON-LD view, config param with the collection, source name)
+SCRAPED = {"cvlac": (cvlac, "scraped_cvlac", "CvLAC"), "gruplac": (gruplac, "scraped_gruplac", "GrupLAC")}
 
 
 def _default(o):
@@ -24,6 +26,8 @@ class Dam(HunabkuPluginBase):
                     doc="Base URL for links and JSON-LD @id, e.g. https://apis.colav.co; empty: the URL of the request")
     config += Param(scraped_cvlac="cvlac_json_f104110_20260823",
                     doc="Collection behind /dam/scraped/cvlac: CvLAC profiles converted with cvlac-json")
+    config += Param(scraped_gruplac="gruplac_related_works_reconciled_minciencias_catalog_20261017",
+                    doc="Collection behind /dam/scraped/gruplac: GrupLAC groups converted by Yuku")
     config += Param(page_size=100,
                     doc="Default number of items per page")
     config += Param(max_page_size=500,
@@ -68,6 +72,54 @@ class Dam(HunabkuPluginBase):
         fmt = self.request.args.get("format")
         return f"format={fmt}&" if fmt else ""
 
+    def serve_doc(self, route, _id):
+        """A document of a scraped source without its parts; parts gives their totals and URLs."""
+        err, fmt = self.check(("apikey", "format"))
+        if err:
+            return err
+        module, param, source = SCRAPED[route]
+        doc = module.get(self.db[self.config[param]], _id)
+        if doc is None:
+            return self.error(404, "Not Found", f"{source} {_id} not found")
+        base = self.base(f"/dam/scraped/{route}/")
+        totals, query = doc.pop("_totals"), self.format_query()
+        doc["parts"] = {p: {"total": totals[p], "url": f"{base}{_id}/{p}?{query}page=1"} for p in module.PARTS}
+        if fmt == "jsonld":
+            doc = module.jsonld(doc, base)
+        return self.send(doc, fmt)
+
+    def serve_part(self, route, _id, part):
+        """One page of a part of a document of a scraped source."""
+        err, fmt = self.check(("apikey", "format", "page", "size"))
+        if err:
+            return err
+        module, param, source = SCRAPED[route]
+        if part not in module.PARTS:
+            return self.error(404, "Not Found", f"part must be one of {list(module.PARTS)}")
+        try:
+            page = int(self.request.args.get("page", 1))
+            size = int(self.request.args.get("size", self.config.page_size))
+        except ValueError:
+            page = size = 0
+        if page < 1 or not 1 <= size <= self.config.max_page_size:
+            return self.error(400, "Bad Request", f"page must be >= 1 and size between 1 and {self.config.max_page_size}")
+        found = module.part(self.db[self.config[param]], _id, part, (page - 1) * size, size)
+        if found is None:
+            return self.error(404, "Not Found", f"{source} {_id} not found")
+        window, total = found
+        pages = max(math.ceil(total / size), 1)
+        if page > pages:
+            return self.error(404, "Not Found", f"{part} of {_id} has {pages} pages of {size}")
+        base = self.base(f"/dam/scraped/{route}/")
+        url = f"{base}{_id}/{part}?{self.format_query()}size={size}&page="
+        doc = module.part_body(part, _id, window)
+        if fmt == "jsonld":
+            doc = module.jsonld(doc, base, part, window)
+        doc["page"] = {"part": part, "number": page, "size": size, "total": total, "pages": pages,
+                       "prev": f"{url}{page - 1}" if page > 1 else None,
+                       "next": f"{url}{page + 1}" if page < pages else None}
+        return self.send(doc, fmt)
+
     @endpoint('/dam/catalog', methods=['GET'])
     def catalog(self):
         """
@@ -91,18 +143,19 @@ class Dam(HunabkuPluginBase):
         err, _ = self.check(("apikey",))
         if err:
             return err
-        coll = self.db[self.config.scraped_cvlac]
-        parser = (coll.find_one({}, {"_provenance.parser": 1}) or {}).get("_provenance", {}).get("parser", {})
-        routes = [{
-            "route": "/dam/scraped/cvlac/{cod_rh}",
-            "stage": "scraped",
-            "source": "CvLAC",
-            "collection": coll.name,
-            "documents": coll.estimated_document_count(),
-            "parser": {k: parser.get(k) for k in ("name", "version", "commit")},
-            "parts": ["/dam/scraped/cvlac/{cod_rh}/" + p for p in cvlac.PARTS],
-            "formats": list(FORMATS),
-        }]
+        routes = []
+        for route, (module, param, source) in SCRAPED.items():
+            coll = self.db[self.config[param]]
+            routes.append({
+                "route": f"/dam/scraped/{route}/{{{module.ID}}}",
+                "stage": "scraped",
+                "source": source,
+                "collection": coll.name,
+                "documents": coll.estimated_document_count(),
+                "parser": module.parser(coll),
+                "parts": [f"/dam/scraped/{route}/{{{module.ID}}}/{p}" for p in module.PARTS],
+                "formats": list(FORMATS),
+            })
         return self.send({"routes": routes})
 
     @endpoint('/dam/scraped/cvlac/<cod_rh>', methods=['GET'])
@@ -129,18 +182,7 @@ class Dam(HunabkuPluginBase):
             curl -H "X-API-Key: XXXX" https://apis.colav.co/dam/scraped/cvlac/0000000639
             curl -H "X-API-Key: XXXX" https://apis.colav.co/dam/scraped/cvlac/0000000639?format=jsonld
         """
-        err, fmt = self.check(("apikey", "format"))
-        if err:
-            return err
-        doc = cvlac.profile(self.db[self.config.scraped_cvlac], cod_rh)
-        if doc is None:
-            return self.error(404, "Not Found", f"CvLAC profile {cod_rh} not found")
-        base = self.base("/dam/scraped/cvlac/")
-        totals, query = doc.pop("_totals"), self.format_query()
-        doc["parts"] = {p: {"total": totals[p], "url": f"{base}{cod_rh}/{p}?{query}page=1"} for p in cvlac.PARTS}
-        if fmt == "jsonld":
-            doc = cvlac.jsonld(doc, base)
-        return self.send(doc, fmt)
+        return self.serve_doc("cvlac", cod_rh)
 
     @endpoint('/dam/scraped/cvlac/<cod_rh>/<part>', methods=['GET'])
     def scraped_cvlac_part(self, cod_rh, part):
@@ -168,31 +210,56 @@ class Dam(HunabkuPluginBase):
         @apiExample {curl} Example usage:
             curl -H "X-API-Key: XXXX" "https://apis.colav.co/dam/scraped/cvlac/0000000639/works?page=2&size=50"
         """
-        err, fmt = self.check(("apikey", "format", "page", "size"))
-        if err:
-            return err
-        if part not in cvlac.PARTS:
-            return self.error(404, "Not Found", f"part must be one of {list(cvlac.PARTS)}")
-        try:
-            page = int(self.request.args.get("page", 1))
-            size = int(self.request.args.get("size", self.config.page_size))
-        except ValueError:
-            page = size = 0
-        if page < 1 or not 1 <= size <= self.config.max_page_size:
-            return self.error(400, "Bad Request", f"page must be >= 1 and size between 1 and {self.config.max_page_size}")
-        found = cvlac.part(self.db[self.config.scraped_cvlac], cod_rh, part, (page - 1) * size, size)
-        if found is None:
-            return self.error(404, "Not Found", f"CvLAC profile {cod_rh} not found")
-        window, total = found
-        pages = max(math.ceil(total / size), 1)
-        if page > pages:
-            return self.error(404, "Not Found", f"{part} of {cod_rh} has {pages} pages of {size}")
-        base = self.base("/dam/scraped/cvlac/")
-        url = f"{base}{cod_rh}/{part}?{self.format_query()}size={size}&page="
-        doc = cvlac.part_body(part, cod_rh, window)
-        if fmt == "jsonld":
-            doc = cvlac.jsonld(doc, base, part, window)
-        doc["page"] = {"part": part, "number": page, "size": size, "total": total, "pages": pages,
-                       "prev": f"{url}{page - 1}" if page > 1 else None,
-                       "next": f"{url}{page + 1}" if page < pages else None}
-        return self.send(doc, fmt)
+        return self.serve_part("cvlac", cod_rh, part)
+
+    @endpoint('/dam/scraped/gruplac/<group_code>', methods=['GET'])
+    def scraped_gruplac(self, group_code):
+        """
+        @api {get} /dam/scraped/gruplac/:group_code GrupLAC group
+        @apiName ScrapedGruplac
+        @apiGroup Dam
+        @apiDescription GrupLAC group as converted by Yuku from the scraped page; parser, source and
+                        bibliographic_transformation are grouped under _provenance. Members and production are
+                        served by pages: parts gives their totals and URLs. The e-mail of the group is not served.
+
+        @apiParam {String} group_code  GrupLAC id, e.g. COL0008423
+        @apiParam {String} apikey  Credential for authentication (or the X-API-Key header)
+        @apiParam {String} [format]  json (default) or jsonld; also chosen with the Accept header (application/ld+json)
+
+        @apiSuccess {Object}  group  The group without members and production, plus parts and _provenance.
+
+        @apiError (Error 401) msg  The HTTP 401 Unauthorized invalid authentication apikey for the target resource.
+        @apiError (Error 400) msg  Bad request, unknown parameter or format.
+        @apiError (Error 404) msg  Group not found.
+
+        @apiExample {curl} Example usage:
+            curl -H "X-API-Key: XXXX" https://apis.colav.co/dam/scraped/gruplac/COL0008423
+        """
+        return self.serve_doc("gruplac", group_code)
+
+    @endpoint('/dam/scraped/gruplac/<group_code>/<part>', methods=['GET'])
+    def scraped_gruplac_part(self, group_code, part):
+        """
+        @api {get} /dam/scraped/gruplac/:group_code/:part GrupLAC group part
+        @apiName ScrapedGruplacPart
+        @apiGroup Dam
+        @apiDescription One page of the members or the production of a GrupLAC group. In JSON-LD each item keeps
+                        the @id of its place in the group, e.g. .../dam/scraped/gruplac/COL0008423#/production/120.
+
+        @apiParam {String} group_code  GrupLAC id, e.g. COL0008423
+        @apiParam {String} part  members or production
+        @apiParam {String} apikey  Credential for authentication (or the X-API-Key header)
+        @apiParam {Number} [page=1]  Page number
+        @apiParam {Number} [size=100]  Items per page, at most max_page_size (500)
+        @apiParam {String} [format]  json (default) or jsonld; also chosen with the Accept header (application/ld+json)
+
+        @apiSuccess {Object}  part  group_code, the items of the page under the part name and page (number, size, total, pages, prev, next).
+
+        @apiError (Error 401) msg  The HTTP 401 Unauthorized invalid authentication apikey for the target resource.
+        @apiError (Error 400) msg  Bad request, unknown parameter, format, page or size.
+        @apiError (Error 404) msg  Group, part or page not found.
+
+        @apiExample {curl} Example usage:
+            curl -H "X-API-Key: XXXX" "https://apis.colav.co/dam/scraped/gruplac/COL0008423/production?page=2"
+        """
+        return self.serve_part("gruplac", group_code, part)
