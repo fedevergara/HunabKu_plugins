@@ -1,0 +1,2 @@
+recursive-include hunabku_dam/ *.py
+recursive-include hunabku_dam/ *.*
