@@ -38,6 +38,18 @@ curl -H "X-API-Key: XXXX" http://localhost:8080/dam/scraped/cvlac/0000000639
 curl -H "X-API-Key: XXXX" "http://localhost:8080/dam/scraped/cvlac/0000000639/works?page=2&size=50&format=jsonld"
 ```
 
+# Dumps
+Whole copies of the routes, one `.jsonld.gz` per route (`{"@graph": [...]}` with the documents as the API serves
+them in JSON-LD), made offline and served by `/dam/dumps` (list, with SHA-256) and `/dam/dumps/{name}`:
+
+```sh
+python -m hunabku_dam.dump --out /data/dam_dumps --public-url https://apis.colav.co   # all routes
+python -m hunabku_dam.dump --out /data/dam_dumps --public-url https://apis.colav.co --route normalized/projects
+```
+
+`--public-url` must be the `public_url` of the plugin, so the @id of the dumps and of the API are the same;
+set `dumps_dir` to the `--out` directory. A dump is written to a temporary file and renamed when complete.
+
 # Production
 `hunabku_server` starts Flask's development server with `debug=True`: do not expose it. Serve the app with a
 WSGI server instead, e.g. with this `wsgi.py` next to `config.py`:
@@ -74,6 +86,7 @@ config.hunabku_dam.Dam.Dam.scraped_cvlac = "cvlac_json_f104110_20260823"
 config.hunabku_dam.Dam.Dam.scraped_gruplac = "gruplac_related_works_reconciled_minciencias_catalog_20261017"
 config.hunabku_dam.Dam.Dam.normalized_projects = "minciencias_projects_v08_20261017"
 config.hunabku_dam.Dam.Dam.normalized_person = "minciencias_person_v04_20261017"
+config.hunabku_dam.Dam.Dam.dumps_dir = "/data/dam_dumps"
 config.hunabku_dam.Dam.Dam.page_size = 100
 config.hunabku_dam.Dam.Dam.max_page_size = 500
 ```

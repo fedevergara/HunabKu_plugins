@@ -1,10 +1,12 @@
 from hunabku.HunabkuBase import HunabkuPluginBase, endpoint
 from hunabku.Config import Config, Param
 from pymongo import MongoClient
-from hunabku_dam import cvlac, gruplac, normalized
+from flask import send_from_directory
+from hunabku_dam import cvlac, dump, gruplac, normalized
 import datetime
 import hmac
 import math
+import os
 
 DEFAULT_APIKEY = "colavudea"  # Hunabku's apikey when HUNABKU_APIKEY is not set
 FORMATS = {"json": "application/json", "jsonld": "application/ld+json"}
@@ -26,14 +28,16 @@ class Dam(HunabkuPluginBase):
                     doc="Database with the collections")
     config += Param(public_url="",
                     doc="Base URL for links and JSON-LD @id, e.g. https://apis.colav.co; empty: the URL of the request")
-    config += Param(scraped_cvlac="cvlac_json_f104110_20260823",
+    config += Param(scraped_cvlac=dump.ROUTES["scraped/cvlac"],
                     doc="Collection behind /dam/scraped/cvlac: CvLAC profiles converted with cvlac-json")
-    config += Param(scraped_gruplac="gruplac_related_works_reconciled_minciencias_catalog_20261017",
+    config += Param(scraped_gruplac=dump.ROUTES["scraped/gruplac"],
                     doc="Collection behind /dam/scraped/gruplac: GrupLAC groups converted by Yuku")
-    config += Param(normalized_projects="minciencias_projects_v08_20261017",
+    config += Param(normalized_projects=dump.ROUTES["normalized/projects"],
                     doc="Collection behind /dam/normalized/projects: projects normalized by Yuku")
-    config += Param(normalized_person="minciencias_person_v04_20261017",
+    config += Param(normalized_person=dump.ROUTES["normalized/person"],
                     doc="Collection behind /dam/normalized/person: persons normalized by Yuku")
+    config += Param(dumps_dir="",
+                    doc="Directory of the dumps made with python -m hunabku_dam.dump; empty: no dumps")
     config += Param(page_size=100,
                     doc="Default number of items per page")
     config += Param(max_page_size=500,
@@ -342,3 +346,55 @@ class Dam(HunabkuPluginBase):
             curl -H "X-API-Key: XXXX" https://apis.colav.co/dam/normalized/person/0000000639?format=jsonld
         """
         return self.serve_normalized("person", cod_rh)
+
+    @endpoint('/dam/dumps', methods=['GET'])
+    def dumps(self):
+        """
+        @api {get} /dam/dumps Dumps
+        @apiName Dumps
+        @apiGroup Dam
+        @apiDescription Whole copies of the routes, one JSON-LD file compressed with gzip per route, made offline
+                        with python -m hunabku_dam.dump. Each file is {"@graph": [...]} with the documents as the
+                        API serves them in JSON-LD.
+
+        @apiParam {String} apikey  Credential for authentication (or the X-API-Key header)
+
+        @apiSuccess {Object[]} dumps  name, url, route, collection, documents, bytes, sha256, created_at.
+
+        @apiError (Error 401) msg  The HTTP 401 Unauthorized invalid authentication apikey for the target resource.
+
+        @apiExample {curl} Example usage:
+            curl -H "X-API-Key: XXXX" https://apis.colav.co/dam/dumps
+        """
+        err, _ = self.check(("apikey",))
+        if err:
+            return err
+        found = dump.manifests(self.config.dumps_dir)
+        for m in found:
+            m["url"] = self.base("/dam/dumps/" + m["name"])
+        return self.send({"dumps": found})
+
+    @endpoint('/dam/dumps/<name>', methods=['GET'])
+    def dump_file(self, name):
+        """
+        @api {get} /dam/dumps/:name Dump file
+        @apiName DumpFile
+        @apiGroup Dam
+        @apiDescription Downloads a dump listed by /dam/dumps (application/gzip). Check it with its sha256.
+
+        @apiParam {String} name  File name, as listed by /dam/dumps
+        @apiParam {String} apikey  Credential for authentication (or the X-API-Key header)
+
+        @apiError (Error 401) msg  The HTTP 401 Unauthorized invalid authentication apikey for the target resource.
+        @apiError (Error 404) msg  Dump not found.
+
+        @apiExample {curl} Example usage:
+            curl -H "X-API-Key: XXXX" -o projects.jsonld.gz https://apis.colav.co/dam/dumps/normalized_projects__minciencias_projects_v08_20261017.jsonld.gz
+        """
+        err, _ = self.check(("apikey",))
+        if err:
+            return err
+        if name not in {m["name"] for m in dump.manifests(self.config.dumps_dir)}:
+            return self.error(404, "Not Found", f"dump {name} not found, see /dam/dumps")
+        return send_from_directory(os.path.abspath(self.config.dumps_dir), name, mimetype="application/gzip",
+                                   as_attachment=True)
