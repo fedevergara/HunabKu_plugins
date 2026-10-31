@@ -1,7 +1,7 @@
 from hunabku.HunabkuBase import HunabkuPluginBase, endpoint
 from hunabku.Config import Config, Param
 from pymongo import MongoClient
-from hunabku_dam import cvlac, gruplac
+from hunabku_dam import cvlac, gruplac, normalized
 import datetime
 import hmac
 import math
@@ -10,6 +10,8 @@ DEFAULT_APIKEY = "colavudea"  # Hunabku's apikey when HUNABKU_APIKEY is not set
 FORMATS = {"json": "application/json", "jsonld": "application/ld+json"}
 # route -> (module with the queries and the JSON-LD view, config param with the collection, source name)
 SCRAPED = {"cvlac": (cvlac, "scraped_cvlac", "CvLAC"), "gruplac": (gruplac, "scraped_gruplac", "GrupLAC")}
+# route -> (config param with the collection, name of the id)
+NORMALIZED = {"projects": ("normalized_projects", "project_id"), "person": ("normalized_person", "cod_rh")}
 
 
 def _default(o):
@@ -28,6 +30,10 @@ class Dam(HunabkuPluginBase):
                     doc="Collection behind /dam/scraped/cvlac: CvLAC profiles converted with cvlac-json")
     config += Param(scraped_gruplac="gruplac_related_works_reconciled_minciencias_catalog_20261017",
                     doc="Collection behind /dam/scraped/gruplac: GrupLAC groups converted by Yuku")
+    config += Param(normalized_projects="minciencias_projects_v08_20261017",
+                    doc="Collection behind /dam/normalized/projects: projects normalized by Yuku")
+    config += Param(normalized_person="minciencias_person_v04_20261017",
+                    doc="Collection behind /dam/normalized/person: persons normalized by Yuku")
     config += Param(page_size=100,
                     doc="Default number of items per page")
     config += Param(max_page_size=500,
@@ -120,6 +126,18 @@ class Dam(HunabkuPluginBase):
                        "next": f"{url}{page + 1}" if page < pages else None}
         return self.send(doc, fmt)
 
+    def serve_normalized(self, entity, _id):
+        """A normalized entity, whole."""
+        err, fmt = self.check(("apikey", "format"))
+        if err:
+            return err
+        doc = normalized.get(self.db[self.config[NORMALIZED[entity][0]]], entity, _id)
+        if doc is None:
+            return self.error(404, "Not Found", f"{entity} {_id} not found")
+        if fmt == "jsonld":
+            doc = normalized.jsonld(doc, entity, self.base(""))
+        return self.send(doc, fmt)
+
     @endpoint('/dam/catalog', methods=['GET'])
     def catalog(self):
         """
@@ -154,6 +172,19 @@ class Dam(HunabkuPluginBase):
                 "documents": coll.estimated_document_count(),
                 "parser": module.parser(coll),
                 "parts": [f"/dam/scraped/{route}/{{{module.ID}}}/{p}" for p in module.PARTS],
+                "formats": list(FORMATS),
+            })
+        for entity, (param, id_name) in NORMALIZED.items():
+            coll = self.db[self.config[param]]
+            sample = coll.find_one({}, {"source_metadata.schema_version": 1, "source_metadata.normalizer_version": 1})
+            meta = (sample or {}).get("source_metadata", {})
+            routes.append({
+                "route": f"/dam/normalized/{entity}/{{{id_name}}}",
+                "stage": "normalized",
+                "collection": coll.name,
+                "documents": coll.estimated_document_count(),
+                "normalizer": {k: meta.get(k) for k in ("schema_version", "normalizer_version")},
+                "parts": [],
                 "formats": list(FORMATS),
             })
         return self.send({"routes": routes})
@@ -263,3 +294,51 @@ class Dam(HunabkuPluginBase):
             curl -H "X-API-Key: XXXX" "https://apis.colav.co/dam/scraped/gruplac/COL0008423/production?page=2"
         """
         return self.serve_part("gruplac", group_code, part)
+
+    @endpoint('/dam/normalized/projects/<project_id>', methods=['GET'])
+    def normalized_projects(self, project_id):
+        """
+        @api {get} /dam/normalized/projects/:project_id Normalized project
+        @apiName NormalizedProjects
+        @apiGroup Dam
+        @apiDescription Project normalized by Yuku from the CvLAC and GrupLAC records that describe it
+                        (source_metadata.occurrences). In JSON-LD, authors link to /dam/normalized/person/:cod_rh
+                        and prov:wasDerivedFrom links to the scraped CvLAC and GrupLAC documents it was built from.
+
+        @apiParam {String} project_id  Project id
+        @apiParam {String} apikey  Credential for authentication (or the X-API-Key header)
+        @apiParam {String} [format]  json (default) or jsonld; also chosen with the Accept header (application/ld+json)
+
+        @apiSuccess {Object}  project  The normalized project.
+
+        @apiError (Error 401) msg  The HTTP 401 Unauthorized invalid authentication apikey for the target resource.
+        @apiError (Error 400) msg  Bad request, unknown parameter or format.
+        @apiError (Error 404) msg  Project not found.
+
+        @apiExample {curl} Example usage:
+            curl -H "X-API-Key: XXXX" https://apis.colav.co/dam/normalized/projects/e5a249d9892d4abcc010bdca3274e1644a82eb2201f73b2af5
+        """
+        return self.serve_normalized("projects", project_id)
+
+    @endpoint('/dam/normalized/person/<cod_rh>', methods=['GET'])
+    def normalized_person(self, cod_rh):
+        """
+        @api {get} /dam/normalized/person/:cod_rh Normalized person
+        @apiName NormalizedPerson
+        @apiGroup Dam
+        @apiDescription Person normalized by Yuku. Sex, marital status, birthplace and birthdate are not served.
+
+        @apiParam {String} cod_rh  CvLAC id, e.g. 0000000639
+        @apiParam {String} apikey  Credential for authentication (or the X-API-Key header)
+        @apiParam {String} [format]  json (default) or jsonld; also chosen with the Accept header (application/ld+json)
+
+        @apiSuccess {Object}  person  The normalized person.
+
+        @apiError (Error 401) msg  The HTTP 401 Unauthorized invalid authentication apikey for the target resource.
+        @apiError (Error 400) msg  Bad request, unknown parameter or format.
+        @apiError (Error 404) msg  Person not found.
+
+        @apiExample {curl} Example usage:
+            curl -H "X-API-Key: XXXX" https://apis.colav.co/dam/normalized/person/0000000639?format=jsonld
+        """
+        return self.serve_normalized("person", cod_rh)
