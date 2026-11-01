@@ -55,7 +55,7 @@ set `dumps_dir` to the `--out` directory. A dump is written to a temporary file 
 WSGI server instead, e.g. with this `wsgi.py` next to `config.py`:
 
 ```py
-import importlib.machinery, importlib.util, os
+import importlib.machinery, importlib.util, os, shutil
 from hunabku.Hunabku import Hunabku
 
 loader = importlib.machinery.SourceFileLoader("config", "config.py")
@@ -66,7 +66,8 @@ module.config.apikey = os.environ["HUNABKU_APIKEY"]
 server = Hunabku(module.config)
 server.apidoc_setup()
 server.load_plugins()
-server.generate_doc()
+if shutil.which("node"):  # apidoc needs node; without it, keep docs generated elsewhere in hunabku_website/static/apidoc
+    server.generate_doc()
 app = server.app
 ```
 
