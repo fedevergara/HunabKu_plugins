@@ -13,9 +13,9 @@ document plus @context, @id and @type, and links made only from ids that are alr
 import re
 
 VOCAB = "https://github.com/colav/HunabKu_plugins/blob/main/HunabKu_dam/docs/normalized.md#"
-EXCLUDE = {
+EXCLUDE = {  # fields that are not served
     "projects": (),
-    "person": ("sex", "marital_status", "birthplace", "birthdate"),  # personal data that is not served
+    "person": (),
 }
 TYPES = {"projects": "schema:ResearchProject", "person": "schema:Person"}
 SCRAPED_KINDS = ("cvlac", "gruplac")

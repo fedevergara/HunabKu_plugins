@@ -1,7 +1,7 @@
 """Offline dumps of the dam routes: one ``.jsonld.gz`` per route, served by /dam/dumps.
 
 Each dump is a JSON-LD document ``{"@graph": [...]}`` whose nodes are the documents of the route as the
-API serves them in JSON-LD (whole, without pages, without the fields that are not served); each node keeps
+API serves them in JSON-LD (whole, without pages, without the fields in EXCLUDE); each node keeps
 its own @context. It is written by streaming, so memory does not grow with the collection, to a temporary
 file renamed at the end, next to a manifest ``<dump>.json`` (route, collection, documents, size, SHA-256).
 
@@ -18,12 +18,12 @@ import time
 
 from pymongo import MongoClient
 
-from hunabku_dam import cvlac, gruplac, normalized
+from hunabku_dam import common, cvlac, gruplac, normalized
 
 # route -> default collection (the same as the plugin config)
 ROUTES = {
-    "scraped/cvlac": "cvlac_json_f104110_20260823",
-    "scraped/gruplac": "gruplac_related_works_reconciled_minciencias_catalog_20261017",
+    "scraped/cvlac": "cvlac_json_f8c70f2_20260823",
+    "scraped/gruplac": "gruplac_json_50594ce_20261017",
     "normalized/projects": "minciencias_projects_v08_20261017",
     "normalized/person": "minciencias_person_v04_20261017",
 }
@@ -33,21 +33,21 @@ def _default(o):
     return o.isoformat() if isinstance(o, (datetime.datetime, datetime.date)) else str(o)
 
 
+SCRAPED = {"scraped/cvlac": cvlac, "scraped/gruplac": gruplac}
+
+
 def projection(route):
-    if route == "scraped/cvlac":
-        return {k: 0 for k in ("_id",) + cvlac.EXCLUDE}
-    if route == "scraped/gruplac":
-        return {k: 0 for k in ("_id",) + gruplac.EXCLUDE}
+    if route in SCRAPED:
+        return {k: 0 for k in SCRAPED[route].EXCLUDE} or None
     return {k: 0 for k in normalized.EXCLUDE[route.split("/")[1]]} or None
 
 
-def served(route, doc, root):
+def served(route, doc, root, coll):
     """A whole document of the route as the API serves it in JSON-LD."""
-    if route == "scraped/cvlac":
-        return cvlac.jsonld(doc, f"{root}/dam/scraped/cvlac/")
-    if route == "scraped/gruplac":
-        doc["_provenance"] = {k: doc.pop(k) for k in gruplac.PROVENANCE if k in doc}
-        return gruplac.jsonld(doc, f"{root}/dam/scraped/gruplac/")
+    if route in SCRAPED:
+        doc = common.restore(coll, doc)
+        del doc["_id"]
+        return SCRAPED[route].jsonld(doc, f"{root}/dam/{route}/")
     return normalized.jsonld(doc, route.split("/")[1], root)
 
 
@@ -76,7 +76,7 @@ def dump(db, route, collection, out, root, log=print):
     with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=6) as fh:
         fh.write('{"@graph": [\n')
         for doc in coll.find({}, projection(route)).sort("_id", 1).batch_size(500):
-            fh.write((",\n" if n else "") + json.dumps(served(route, doc, root), ensure_ascii=False, default=_default))
+            fh.write((",\n" if n else "") + json.dumps(served(route, doc, root, coll), ensure_ascii=False, default=_default))
             n += 1
             if n % 20000 == 0:
                 rate = n / (time.time() - started)

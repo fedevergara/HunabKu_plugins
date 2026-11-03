@@ -82,7 +82,8 @@ def main():
         install_requires=[
             'hunabku',
             'pymongo',
-            'cvlac-json',  # to_jsonld: unreleased, >0.4.0
+            'cvlac-json>=0.7',  # other_products and patents
+            'gruplac-json',  # to_jsonld: unreleased, >0.3.0
         ],
     )
 
