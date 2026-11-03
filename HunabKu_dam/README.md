@@ -73,7 +73,7 @@ app = server.app
 ```
 
 ```sh
-gunicorn -w 4 -b 127.0.0.1:8080 wsgi:app
+gunicorn -w 4 -b 127.0.0.1:8080 --preload wsgi:app   # --preload: one apidoc_setup, not one per worker
 ```
 
 Install the plugin without `pip install -e` (or with `--config-settings editable_mode=compat`): Hunabku finds
